@@ -1,5 +1,4 @@
 import streamlit as st
-import cv2
 import pytesseract
 import spacy
 import re
@@ -70,14 +69,9 @@ def detect_pii(text):
     return pii_entities
 
 # ---------------- Image Redaction ----------------
-def preprocess_image(cv_img):
-    gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
-    return cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-
 def redact_image(image, method="black", selected_pii_types=None):
-    cv_img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-    processed_img = preprocess_image(cv_img)
-    data = pytesseract.image_to_data(processed_img, output_type=pytesseract.Output.DICT)
+    cv_img = np.array(image.convert("RGB"))
+    data = pytesseract.image_to_data(cv_img, output_type=pytesseract.Output.DICT)
     detected_pii = []
     n_boxes = len(data['text'])
     for i in range(n_boxes):
@@ -92,12 +86,12 @@ def redact_image(image, method="black", selected_pii_types=None):
             x, y, w, h = data['left'][i], data['top'][i], data['width'][i], data['height'][i]
             detected_pii.extend([(ent_text, ent_label, (x, y, w, h)) for ent_text, ent_label in entities_to_redact])
             if method == "black":
-                cv2.rectangle(cv_img, (x, y), (x+w, y+h), (0,0,0), -1)
+                cv_img[y:y+h, x:x+w] = 0
             elif method == "blur":
                 roi = cv_img[y:y+h, x:x+w]
                 roi = cv2.GaussianBlur(roi, (51,51), 0)
                 cv_img[y:y+h, x:x+w] = roi
-    return cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB), detected_pii
+    return Image.fromarray(cv_img), detected_pii
 
 # ---------------- Audit Logging ----------------
 def log_redaction(username, role, filename, detected_pii):
@@ -108,8 +102,6 @@ def log_redaction(username, role, filename, detected_pii):
 
 # ---------------- Privacy Risk ----------------
 PII_WEIGHTS = {"AADHAAR":10,"PAN":8,"MOBILE_NUMBER":5,"EMAIL":4,"DOB":6,"NAME":3,"VOTER_ID":7,"DRIVING_LICENSE":7,"BANK_ACCOUNT":9,"IFSC":6}
-def calculate_privacy_risk(detected_pii):
-    return sum(PII_WEIGHTS.get(ent_label,1) for _, ent_label, _ in detected_pii)
 
 # ---------------- Streamlit UI ----------------
 st.set_page_config(page_title="📄 PII Redactor", layout="wide")
@@ -150,21 +142,26 @@ with tabs[0]:
             tmp_file.write(uploaded_file.read())
             tmp_path = tmp_file.name
 
-        if uploaded_file.name.lower().endswith(".pdf"):
-            try:
-                pages = convert_from_path(tmp_path, poppler_path=None)
-                redacted_pages, detected_pii = [], []
-                for page in pages:
-                    r_img, d_pii = redact_image(page, method=redaction_method, selected_pii_types=selected_pii)
-                    redacted_pages.append(Image.fromarray(r_img))
-                    detected_pii.extend(d_pii)
-                st.image(redacted_pages[0], caption="Redacted PDF (Page 1)", width=600)
-            except Exception as e:
-                st.error(f"PDF Processing failed: {e}")
+        detected_pii = []
+
+        if st.session_state.user_role != "admin" or admin_redaction_toggle:
+            if uploaded_file.name.lower().endswith(".pdf"):
+                try:
+                    pages = convert_from_path(tmp_path, poppler_path=None)
+                    redacted_pages = []
+                    for page in pages:
+                        r_img, d_pii = redact_image(page, method=redaction_method, selected_pii_types=selected_pii)
+                        redacted_pages.append(r_img)
+                        detected_pii.extend(d_pii)
+                    st.image(redacted_pages[0], caption="Redacted PDF (Page 1)", width=600)
+                except Exception as e:
+                    st.error(f"PDF Processing failed: {e}")
+            else:
+                image = Image.open(tmp_path)
+                redacted_img, detected_pii = redact_image(image, method=redaction_method, selected_pii_types=selected_pii)
+                st.image(redacted_img, caption="Redacted Image", width=600)
         else:
-            image = Image.open(tmp_path)
-            redacted_img, detected_pii = redact_image(image, method=redaction_method, selected_pii_types=selected_pii)
-            st.image(redacted_img, caption="Redacted Image", width=600)
+            st.info("Redaction is turned OFF by admin.")
 
         log_redaction(username if st.session_state.authenticated else "anonymous",
                       st.session_state.user_role, uploaded_file.name, detected_pii)
