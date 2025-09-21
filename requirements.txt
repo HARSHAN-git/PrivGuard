@@ -1,6 +1,6 @@
 streamlit
 pillow
-opencv-python-headless
+opencv-python-headless==4.8.1.78
 pytesseract
 spacy
 torch
@@ -11,4 +11,3 @@ numpy
 cryptography
 pdf2image
 en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1.tar.gz
-
