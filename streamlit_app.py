@@ -50,8 +50,7 @@ USERS = {
     "auditor_user": {"password": "audit123", "role": "auditor"}
 }
 
-# ---------------- Helper Functions ----------------
-@st.cache_data
+# ---------------- PII Detection ----------------
 def detect_pii(text):
     pii_entities = []
     doc = nlp(text)
@@ -70,22 +69,15 @@ def detect_pii(text):
         pii_entities.extend([(m, label) for m in matches])
     return pii_entities
 
+# ---------------- Image Redaction ----------------
 def preprocess_image(cv_img):
     gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
     return cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
 
-@st.cache_data
-def get_ocr_data(cv_img):
-    processed_img = preprocess_image(cv_img)
-    return pytesseract.image_to_data(processed_img, output_type=pytesseract.Output.DICT)
-
 def redact_image(image, method="black", selected_pii_types=None):
-    # Resize large images to speed up OCR
-    max_width = 1200
-    image.thumbnail((max_width, max_width), Image.ANTIALIAS)
-
     cv_img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-    data = get_ocr_data(cv_img)
+    processed_img = preprocess_image(cv_img)
+    data = pytesseract.image_to_data(processed_img, output_type=pytesseract.Output.DICT)
     detected_pii = []
     n_boxes = len(data['text'])
     for i in range(n_boxes):
@@ -107,14 +99,15 @@ def redact_image(image, method="black", selected_pii_types=None):
                 cv_img[y:y+h, x:x+w] = roi
     return cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB), detected_pii
 
+# ---------------- Audit Logging ----------------
 def log_redaction(username, role, filename, detected_pii):
     with open("audit_log.csv", "a", newline='', encoding="utf-8") as f:
         writer = csv.writer(f)
         for ent_text, ent_label, _ in detected_pii:
             writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), username, role, filename, ent_label, ent_text])
 
+# ---------------- Privacy Risk ----------------
 PII_WEIGHTS = {"AADHAAR":10,"PAN":8,"MOBILE_NUMBER":5,"EMAIL":4,"DOB":6,"NAME":3,"VOTER_ID":7,"DRIVING_LICENSE":7,"BANK_ACCOUNT":9,"IFSC":6}
-
 def calculate_privacy_risk(detected_pii):
     return sum(PII_WEIGHTS.get(ent_label,1) for _, ent_label, _ in detected_pii)
 
@@ -159,15 +152,13 @@ with tabs[0]:
 
         if uploaded_file.name.lower().endswith(".pdf"):
             try:
-                with st.spinner("🔎 Processing PDF..."):
-                    pages = convert_from_path(tmp_path, poppler_path=None)
-                    redacted_pages, detected_pii = [], []
-                    for i, page in enumerate(pages):
-                        r_img, d_pii = redact_image(page, method=redaction_method, selected_pii_types=selected_pii)
-                        redacted_pages.append(Image.fromarray(r_img))
-                        detected_pii.extend(d_pii)
-                        st.progress((i+1)/len(pages))
-                    st.image(redacted_pages[0], caption="Redacted PDF (Page 1)", width=600)
+                pages = convert_from_path(tmp_path, poppler_path=None)
+                redacted_pages, detected_pii = [], []
+                for page in pages:
+                    r_img, d_pii = redact_image(page, method=redaction_method, selected_pii_types=selected_pii)
+                    redacted_pages.append(Image.fromarray(r_img))
+                    detected_pii.extend(d_pii)
+                st.image(redacted_pages[0], caption="Redacted PDF (Page 1)", width=600)
             except Exception as e:
                 st.error(f"PDF Processing failed: {e}")
         else:
@@ -199,4 +190,7 @@ with tabs[1]:
 with tabs[2]:
     st.header("📂 Audit Log Viewer")
     try:
-        df = pd.read_csv("audit_log")
+        df = pd.read_csv("audit_log.csv", names=["Timestamp","Username","Role","Filename","PII_Label","PII_Text"], encoding="utf-8")
+        st.dataframe(df)
+    except FileNotFoundError:
+        st.info("No audit log yet.")
